@@ -1,0 +1,310 @@
+---
+title: "Figure 2"
+author: "Joe Raymond"
+date: "April 1, 2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(tidy = TRUE)
+knitr::opts_chunk$set(eval = TRUE)
+knitr::opts_chunk$set(fig.width = 8)
+knitr::opts_chunk$set(fig.height = 4)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(error = FALSE)
+knitr::opts_chunk$set(dev = 'png')
+knitr::opts_chunk$set(tidy = FALSE)
+library(Seurat)
+library(dplyr)
+library(RColorBrewer)
+```
+
+
+```{r, eval = TRUE, echo = FALSE}
+#Helper functions and color palette
+colors <- c(brewer.pal(7,"Set2"),brewer.pal(7,"Set1"),brewer.pal(7,"Set3"))
+heat <- c('sky blue', 'lightyellow2', 'red')
+#Creating bar graphs to break down cells by metadata type
+#x.axis = metadata values that will go across x axis of graph
+#grouping = metadata values sample percentages will be broken into (that add up to 1)
+#x.axis/grouping.order = array of values in order you would like them to appear
+#cols = colors for bars
+#grouping_style = 'stack' or 'dodge' for how barplot will be grouped
+#error.bars = whether you would like error bars based on a third metadata value
+#err.samp = required if error.bars = T; metadata column to pull values for splitting
+#   the x.axis groups into samples for standard deviation calculation
+JR.bar.plot <- function(meta = dataset@meta.data,
+                            x.axis, grouping,
+                            x.axis.order = NA, x.axis.title = NA,
+                            grouping.order = NA,  grouping.title = NA,
+                            cols = NA, grouping_style = 'dodge',
+                            error.bars = F, err.samp = 'sample'){
+  require(dplyr)
+  require(reshape2)
+  require(ggplot2)
+  if(is.na(x.axis.title)){x.axis.title <- x.axis}
+  if(is.na(grouping.title)){grouping.title <- grouping}
+  if(error.bars == T){
+    meta.melt <- melt(meta, id.vars = grouping, measure.vars = err.samp)
+    colnames(meta.melt) <- c('grouping', 'variable', 'value')
+    cast <- dcast(meta.melt, grouping ~ value)
+    cast <- JR.col.to.row(cast)
+    Total <- colSums(cast)
+    perc <- t(t(cast)/Total)
+    perc.melt <- melt(perc, variable.name = x.axis,
+                      value.name = 'Percent Total Cells') %>% 
+      mutate(`Percent Total Cells` = round(`Percent Total Cells`, digits = 3)) %>%
+      mutate('Var2' = as.character(Var2))
+    coldat <- meta %>% dplyr::select('x.axis' = x.axis, 'Var2' = err.samp) %>%
+      unique()
+    perc.melt <- dplyr::left_join(x = perc.melt, y = coldat, by = 'Var2')
+    sd.dat <- c()
+    for(i in unique(perc.melt$x.axis)){
+      sub <- perc.melt[perc.melt$x.axis == i,]
+      cast <- dcast(sub, Var1 ~ Var2, value.var = 'Percent Total Cells')
+      cast <- cbind(cast,'Percent Total Cells' = rowMeans(as.matrix(JR.col.to.row(cast))),
+                    'sds' = rowSds(as.matrix(JR.col.to.row(cast))),
+                    'x.axis' = i) %>%
+        dplyr::select(Var1, x.axis, `Percent Total Cells`, sds)
+      sd.dat <- rbind(sd.dat, cast)
+    }
+    perc.melt <- sd.dat
+  } else {
+    meta.melt <- melt(meta, id.vars = grouping, measure.vars = x.axis)
+    colnames(meta.melt) <- c('grouping', 'variable', 'value')
+    cast <- dcast(meta.melt, grouping ~ value)
+    cast <- JR.col.to.row(cast)
+    Total <- colSums(cast)
+    perc <- t(t(cast)/Total)
+    perc.melt <- melt(perc, variable.name = x.axis,
+                      value.name = 'Percent Total Cells') %>% 
+      mutate(`Percent Total Cells` = round(`Percent Total Cells`, digits = 3))
+  }
+  if(error.bars == T){
+    colnames(perc.melt) <- c('grouping', 'x.axis', 'Percent Total Cells',
+                            'sds')
+  }else{
+    colnames(perc.melt) <- c('grouping', 'x.axis', 'Percent Total Cells')
+  }
+  if(is.na(x.axis.order) == F){
+    perc.melt <- dplyr::mutate(perc.melt, x.axis = factor(x.axis, levels = x.axis.order))
+  }
+  if(is.na(grouping.order) == F){
+    perc.melt <- dplyr::mutate(perc.melt, grouping = factor(grouping, levels = grouping.order))
+  }
+  gg <- ggplot(perc.melt, aes(x = as.factor(x.axis), y = `Percent Total Cells`)) +
+    geom_col(aes(fill = as.factor(grouping)), position = grouping_style) +
+    theme_minimal() + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    xlab(x.axis.title) +
+    ylab(paste('Percent Cells within ', x.axis.title, sep = '')) +
+    labs(fill = grouping.title)
+  if(is.na(cols) == F){
+    col.len <- length(unique(perc.melt$grouping))
+    gg <- gg + scale_fill_manual(values = cols[1:col.len])
+  }
+  if(error.bars == T){
+    gg <- gg +
+      geom_errorbar(aes(ymin = (`Percent Total Cells` - `sds`),
+                        ymax = (`Percent Total Cells` + `sds`),
+                        fill = grouping),
+                    width = .2, position = position_dodge(width = .9))
+  }
+  return(gg)
+}
+# Simple function to take first column of a data frame and convert it to the rownames
+JR.col.to.row <- function(df){
+  rows <- df[,1]
+  rownames(df) <- rows
+  df <- df[,2:ncol(df)]
+  return(df)
+}
+```
+```{r, eval = TRUE, echo = FALSE}
+#Loading data
+path <- '/dlab/NS/tnt/data/by-source/mouse/10XJR30_Tau_Mice_20200511/Seurat/10XJR31_Pilot_organoid_dataset.Robj'
+load(path)
+```
+
+## Merging maturing and migrating neurons
+```{r}
+meta <- dataset@meta.data
+meta$predicted.id2 <- meta$predicted.id
+meta[meta$predicted.id == 'Maturing Neurons' | meta$predicted.id == 'Migrating Neurons',]$predicted.id2 <- 'Migrating/Maturing Neurons'
+dataset@meta.data <- meta
+```
+
+
+## Figure 2B
+```{r}
+dataset$age <- factor(dataset$age, levels = c('30', '90', '166'))
+UMAPPlot(dataset, group.by = 'predicted.id2',
+         cols = c(colors[1:6], colors[8:13])) +
+  ggtitle('') +
+  theme(legend.position = 'none')
+UMAPPlot(dataset, group.by = 'age', cols = colors)
+```
+
+## Figure 2C
+```{r}
+stack.order <- c('Ventral Radial Glia', 'Outer Radial Glia', 'OPCs',
+        'Migrating Neurons', 'Microglia', 'Maturing Upper Layer Neurons',
+        'Maturing Neurons', 'Intermediate Progenitors', 'Inhibitory Neurons',
+        'Endothelial', 'Deep Layer Excitatory Neurons', 'Cycling Cells')
+stack.order <- c('Ventral Radial Glia', 'Outer Radial Glia', 'OPCs',
+        'Migrating/Maturing Neurons', 'Microglia',
+        'Maturing Upper Layer Neurons','Intermediate Progenitors',
+        'Inhibitory Neurons', 'Endothelial', 'Deep Layer Excitatory Neurons',
+        'Cycling Cells')
+
+name.order <- c('Cycling Cells', 'Deep Layer Excitatory Neurons', 'Endothelial',
+                'Inhibitory Neurons', 'Intermediate Progenitors',
+                'Maturing Upper Layer Neurons', 'Microglia',
+                'Migrating/Maturing Neurons', 'OPCs', 'Outer Radial Glia',
+                'Pericytes', 'Ventral Radial Glia')
+new.order <- rev(c('Ventral Radial Glia', 'Outer Radial Glia', 'Cycling Cells',
+               'Intermediate Progenitors', 'Migrating/Maturing Neurons',
+               'Deep Layer Excitatory Neurons', 'Maturing Upper Layer Neurons',
+               'Inhibitory Neurons', 'Microglia','OPCs', 'Endothelial'))
+umap.cols <- c(colors[1:6], colors[8:13])
+new.colors <- c()
+for(i in new.order){
+  cols <- match(i, name.order)
+  new.colors <- c(new.colors, umap.cols[cols])
+}
+
+
+meta <- dataset@meta.data[dataset@meta.data$predicted.id2 %in% stack.order,] 
+gg <- JR.bar.plot(meta = meta, grouping = 'predicted.id2',
+                  x.axis = 'age', grouping.order = new.order,
+                  cols = new.colors, grouping_style = 'stack')
+gg + xlab('Age (days)') + ylab('Fraction of Cells') + 
+  labs(fill ='Cell types') +
+  theme(axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 16),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 16),
+        legend.title = element_text(size = 18)) 
+```
+
+## Figure 2D
+```{r}
+genes <- c('SOX2', 'MKI67', 'PTPRZ1', 'EOMES', 'NFIB', 'VIM', 'TOP2A', 'HOPX',
+           'PPP1R17', 'SATB2')
+for(i in genes){
+  print(FeaturePlot(dataset, features = i, cols = heat))
+}
+```
+
+## Figure 2H
+```{r}
+library(dplyr)
+library(scales)
+load('/dlab/NS/tnt/data/by-source/16p11multi/10XJR33_10XJR34_10XJR35_16p11d90_20200723/Seurat/20201028_d90_all_w_transfer_anchors.Robj')
+cells.to.ignore <- c(JR.which.cells(dataset, meta.col = 'sample',
+                                    which = 'H9_WT_90_2_35'),
+                     JR.which.cells(dataset, meta.col = 'sample',
+                                    which = 'H9_WT_90_1_32'),
+                     JR.which.cells(dataset, meta.col = 'sample',
+                                    which = 'H9_WT_90_2_34'),
+                     JR.which.cells(dataset, meta.col = 'sample',
+                                    which = 'H9_WT_90_1_34'),
+                     JR.which.cells(dataset, meta.col = 'sample',
+                                    which = 'H9_WT_90_1_35'),
+                     JR.which.cells(dataset, meta.col = 'sample',
+                                    which = '8402_WT_90_2_35'))
+cells.of.int <- colnames(dataset)[colnames(dataset) %in% cells.to.ignore == F]
+dataset.sub <- subset(dataset, cells = cells.of.int)
+cell.types.of.int <- c('Cycling Cells', 'Deep Layer Excitatory Neurons',
+                       'Inhibitory Neurons', 'Intermediate Progenitors', 
+                       'Maturing Neurons', 'Maturing Upper Layer Neurons',
+                       'Migrating Neurons', 'Outer Radial Glia',
+                       'Ventral Radial Glia', 'Migrating/ Maturing Neurons')
+new.order <- c('Ventral Radial Glia', 'Outer Radial Glia', 'Cycling Cells',
+               'Intermediate Progenitors', 'Migrating/ Maturing Neurons',
+               'Migrating Neurons', 'Maturing Neurons',
+               'Deep Layer Excitatory Neurons', 'Maturing Upper Layer Neurons',
+               'Inhibitory Neurons', 'Microglia', 'Pericytes', 'OPCs', 'Endothelial')
+new.order <- new.order[new.order %in% cell.types.of.int]
+meta <- dataset.sub@meta.data
+meta[meta$predicted.id == 'Maturing Neurons' | meta$predicted.id == 'Migrating Neurons',]$predicted.id <- 'Migrating/ Maturing Neurons'
+meta <- meta %>% dplyr::select(predicted.id, prediction.score.max, sample) %>%
+  dplyr::filter(predicted.id %in% cell.types.of.int) %>%
+  melt(value.name = 'Prediction Score') %>% 
+  dcast(sample ~ predicted.id, fun.aggregate = mean) %>%
+  melt(value.name = 'Prediction Score') %>% 
+  mutate('Cell Type' = variable) %>%
+  separate(col = 'sample', sep = '_', remove = F,
+           into = c('cellline', 'Genotype', 'age', 'batch', 'exp')) %>%
+  mutate(Genotype = factor(Genotype, levels = c('DEL', 'WT', 'DUP'))) %>% 
+  mutate('Cell Type' = factor(`Cell Type`, levels = new.order)) %>%
+  dplyr::filter(Genotype == 'WT') %>%
+  mutate('Study' = 'Kostic')
+stash.meta <- meta
+
+#external data
+load('/dlab/NS/tnt/data/by-source/public/2020_Tanaka_organoid_dataset_compilation/dataset.Robj')
+cell.types.of.int <- c('Cycling Cells', 'Deep Layer Excitatory Neurons',
+                       'Inhibitory Neurons', 'Intermediate Progenitors', 
+                       'Maturing Neurons', 'Maturing Upper Layer Neurons',
+                       'Migrating Neurons', 'Outer Radial Glia',
+                       'Ventral Radial Glia', 'Migrating/ Maturing Neurons')
+new.order <- c('Ventral Radial Glia', 'Outer Radial Glia', 'Cycling Cells',
+               'Intermediate Progenitors', 'Migrating/ Maturing Neurons',
+               'Migrating Neurons', 'Maturing Neurons',
+               'Deep Layer Excitatory Neurons', 'Maturing Upper Layer Neurons',
+               'Inhibitory Neurons', 'Microglia', 'Pericytes', 'OPCs', 'Endothelial')
+new.order <- new.order[new.order %in% cell.types.of.int]
+meta <- dataset@meta.data
+meta[meta$predicted.id == 'Maturing Neurons' | meta$predicted.id == 'Migrating Neurons',]$predicted.id <- 'Migrating/ Maturing Neurons'
+meta <- meta %>% dplyr::select(predicted.id, prediction.score.max, Dataset) %>%
+  dplyr::filter(predicted.id %in% cell.types.of.int) %>%
+  melt(value.name = 'Prediction Score') %>% 
+  dcast(Dataset ~ predicted.id, fun.aggregate = mean) %>%
+  melt(value.name = 'Prediction Score') %>% 
+  mutate('Cell Type' = variable) %>%
+  mutate('Cell Type' = factor(`Cell Type`, levels = new.order)) %>%
+  separate(col = 'Dataset', into = c('Study', 'age', 'sample'), remove = F) %>%
+  dplyr::select(sample, Study, variable, `Prediction Score`, `Cell Type`)
+meta[is.na(meta$sample),]$sample <- '1'
+
+#merging data
+stash.meta <- dplyr::select(stash.meta, sample, Study, variable, `Prediction Score`, `Cell Type`)
+meta <- rbind(stash.meta, meta)
+study.order <- c('Kostic', 'Birey', 'Trujillo', 'Velasco', 'Quadrato')
+meta <- dplyr::mutate(meta, 'Study' = factor(Study, levels = study.order))
+gg <- ggplot(meta) + 
+  geom_boxplot(aes(x = `Cell Type`, y = `Prediction Score`, color = Study),
+               alpha = 5, weight = .5, position = position_dodge(width = .8)) +
+  geom_jitter(position = position_dodge(width = .8),
+               aes(x = `Cell Type`, y = `Prediction Score`, color = Study),
+               alpha = .6, size = 1) +
+  ggtitle('') + theme_classic() + 
+  theme(axis.text.x = element_text(angle = 60, vjust = .5, size = 11),
+        axis.title.x = element_blank()) +
+  ylim(0,1) +
+  theme(legend.title = element_blank()) +
+  theme(legend.text = element_text(size = 14)) +
+  theme(plot.title = element_text(hjust = .5, size = 16)) +
+  scale_x_discrete(labels = wrap_format(12)) +
+  scale_fill_manual(values = c('red', 'skyblue3', 'royalblue3',
+                               'springgreen3', 'gray40')) +
+  scale_color_manual(values = c('red', 'skyblue3', 'royalblue3',
+                                'springgreen3', 'gray40'))
+gg +
+  theme(axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 16),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 16),
+        legend.title = element_text(size = 18)) 
+```
+
+
+```{r}
+sessionInfo()
+```
+

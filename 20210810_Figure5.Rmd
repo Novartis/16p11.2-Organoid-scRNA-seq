@@ -1,0 +1,293 @@
+---
+title: "Figure 5"
+author: "Joe Raymond"
+date: "August 5, 2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(tidy = TRUE)
+knitr::opts_chunk$set(eval = TRUE)
+knitr::opts_chunk$set(fig.width = 8)
+knitr::opts_chunk$set(fig.height = 4)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(error = FALSE)
+knitr::opts_chunk$set(dev = 'png')
+knitr::opts_chunk$set(tidy = FALSE)
+library(Seurat)
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(RColorBrewer)
+library(matrixStats)
+library(tidyr)
+obj.path <- '/path/to/dataset'
+save.path <- '/some/path/'
+```
+
+## Helper Functions
+```{r}
+#grabs subset of cell names based on metadata (mostly exists for readability)
+## dataset - a seurat dataset
+## meta.col - the column name from dataset@meta.data containing the metadata
+##            being used for the subsetting
+## which - the value in 'meta.col' that is being selected
+JR.which.cells <- function(dataset = dataset,
+                           meta.col = 'genotype',
+                           which = 'WT'){
+  return(rownames(dataset@meta.data[dataset@meta.data[,meta.col] == which,]))
+}
+
+#Function to perform pseudobulk DE Seurat scRNA-seq object
+##samples.factor - the metadata column name that contains sample (library)
+##                 metadata info
+##ident.factor - the metadata column name that contains the contrast metadata 
+##               info
+##ident.1 - the value in <ident.factor> of the first subset of cells in the
+##          contrast
+##ident.2 (OPTIONAL) - the value in <ident.factor> of the second subset of cells
+##                     in the contrast
+##                   - leaving this value blank will use all other cells in
+##                     dataset as ident.2 
+##subset.factor (OPTIONAL) - the metadata column name that contains the values
+##                           to subset object by
+##subset (OPTIONAL) - the metadata value from <subset.factor> by which it will
+##                    subset the object
+##cells (OPTIONAL) - a vector of cell names to include in the contrast
+##                   (alternative to using subset)
+JR.pseudo.bulk <- function(dataset = dataset,
+                           samples.factor = 'sample',
+                           ident.factor = 'genotype',
+                           subset.factor = NULL,
+                           subset = NULL,
+                           cells = NULL,
+                           ident.1 = 'KO',
+                           ident.2 = NULL){
+  require(DESeq2)
+  require(dplyr)
+  require(rlist)
+  if(is.null(subset.factor) == F){
+    #subsets by 'subset' within 'subset.factor' if chosen
+    dataset <- subset(dataset,
+      cells = rownames(dataset@meta.data[dataset@meta.data[,subset.factor] == subset,]))
+  }
+  if(is.null(cells) == F){
+    #subsets using cell vector if provided
+    dataset <- subset(dataset, cells = cells)
+  }
+  #takes all cells not from ident.1 as ident.2 if an ident.2 isn't specified
+  if(is.null(ident.2)){
+    ident.2.cells <- rownames(dataset@meta.data[dataset@meta.data[,ident.factor] != ident.1,])
+  } else{
+    ident.2.cells <- rownames(dataset@meta.data[dataset@meta.data[,ident.factor] == ident.2,])
+  }
+  #takes only cells from within idents chosen (or all cells if ident.2 unspecified)
+  dataset <- subset(dataset,
+                    cells = c(rownames(dataset@meta.data[dataset@meta.data[,ident.factor] == ident.1,]),
+                             ident.2.cells))
+  #adding metadata to represent each of the idents and then splitting the data
+  #into unique sample/ident combinations for creating pseudobulk data
+  dataset@meta.data$new.idents <- 'ident1'
+  dataset@meta.data[ident.2.cells,]$new.idents <- 'ident2'
+  dataset$split.factor <- paste0(dataset$new.idents,
+                                 '_' ,dataset@meta.data[,samples.factor])
+  datasets <- SplitObject(dataset, split.by = 'split.factor')
+  bulk.de <- c() #will contain pseudobulk dataset
+  colnames.de <- c()
+  #loops through each sample to create a pseudobulk sample
+  for(i in 1:length(datasets)){
+    samp.name <- datasets[[i]]$split.factor %>% unique()
+    counts <- datasets[[i]]@assays$RNA@counts
+    bulk.samp <- rowSums(as.matrix(counts))
+    bulk.de <- cbind(bulk.de, bulk.samp)
+    colnames.de <- c(colnames.de, samp.name)
+    colnames(bulk.de) <- colnames.de
+  }
+  coldata <- dataset@meta.data %>%
+    dplyr::select(samples.factor, new.idents, split.factor) %>% unique()
+  colnames(coldata) <- c('samples.factor', 'ident.factor', 'split.factor')
+  rownames(coldata) <- coldata$split.factor
+  dds <- DESeqDataSetFromMatrix(countData = bulk.de,
+                                colData = coldata,
+                                design = ~ ident.factor)
+  dds <- DESeq(dds)
+  resultsNames(dds) # lists the coefficients
+  res <- results(dds, contrast = c('ident.factor', 'ident1', 'ident2')) %>%
+    as.data.frame() %>% dplyr::filter(baseMean > 0 & is.na(padj) == F)
+  summary(res$padj < .05)
+  return(res)
+}
+# Produces volcano plot from JR.pseudo.bulk output
+# (requires ggplot2 and ggrepel)
+# define significant -log10(pvaladj) with sigp and significant Log2FC with
+# sigfc for labeling and color
+# overp and overfc are overrides that will label anything over either of
+# these values regardless of the other 
+# i.e. low logfc high p val or high logfc low p val will be labeled
+# interesting.genes takes a list of genes of interest and will highlight them
+# green on the plot
+# optional title argument available
+# can turn off labelling for either interesting genes or significant genes
+JR.pseudobulk.volc.plot <- function(res,
+                                    sigp=2, sigfc=.5,
+                                    overp=100, overfc=10,
+                                    title="",
+                                    interesting.genes = NULL,
+                                    do.label = TRUE,
+                                    max.overlaps = 10,
+                                    label.sig = T,
+                                    label.interesting = T){
+  require(ggplot2)
+  require(ggrepel)
+  require(dplyr)
+  label.sig <- ifelse(label.sig == T, 1, 2)
+  res$Gene <- rownames(res)
+  res <- res %>% dplyr::mutate(logp = -log10(padj)) %>%
+                 dplyr::mutate(sig = as.integer(logp > sigp & abs(log2FoldChange) > sigfc),
+                 interesting = as.integer(logp > sigp & abs(log2FoldChange) > sigfc | logp > overp | abs(log2FoldChange) > overfc))
+  if(is.null(interesting.genes) == F){
+    if(label.interesting == T){
+      res[rownames(res) %in% interesting.genes ==T,]$interesting <- 2
+    }
+    res[rownames(res) %in% interesting.genes ==T,]$sig <- 2
+  }
+  res <- res %>% 
+    dplyr::mutate(Gene = ifelse(interesting >= label.sig, rownames(res),""))
+  res$logp <- as.numeric(gsub(x = res$logp, pattern = Inf, replacement = 300))
+  gg <- ggplot(data=res, aes(x=log2FoldChange,y=logp)) + 
+    geom_point(aes(size=logp, col=as.factor(sig), alpha = .1)) +
+    theme_bw() +
+    ylim(-1, NA) +
+    scale_color_manual(values=c("black","red","green")[1:length(unique(res$sig))]) +
+    ylab("-Log10(p.val.adj)") + xlab("Log2FC") + 
+    geom_hline(yintercept= sigp, linetype="dashed", color = "red") +
+    geom_vline(xintercept= sigfc, linetype="dashed", color = "red") +
+    geom_vline(xintercept= -sigfc, linetype="dashed", color = "red") +
+    geom_vline(xintercept = 0, linetype = "solid", color = "black") + 
+    geom_hline(yintercept = 0, linetype = "solid", color = "black") +
+    ggtitle(title) + theme(legend.position="none") +
+    theme(plot.title = element_text(hjust = 0.5))
+  if(max(abs(res$log2FoldChange)) < 1){
+    gg <- gg + xlim(-1,1)
+  }
+  if(do.label == TRUE){
+    gg <- gg + geom_label_repel(data=res,aes(label= Gene),
+                                max.overlaps = max.overlaps)
+  }
+  
+  return(gg)
+}
+```
+
+
+## Figure 5A
+```{r}
+
+```
+
+
+## Figure 5C
+```{r}
+load(obj.path)
+# subsetting to only include one replicate of each biological sample to avoid
+# skewing of results toward cell lines with higher number of replicates
+cells.to.ignore <- c(JR.which.cells(dataset, meta.col = 'sample',
+                                    which = 'H9_WT_90_2_35'),
+                     JR.which.cells(dataset, meta.col = 'sample',
+                                    which = 'H9_WT_90_1_32'),
+                     JR.which.cells(dataset, meta.col = 'sample',
+                                    which = 'H9_WT_90_2_34'), 
+                     JR.which.cells(dataset, meta.col = 'sample',
+                                    which = 'H9_WT_90_1_34'),
+                     JR.which.cells(dataset, meta.col = 'sample',
+                                    which = 'H9_WT_90_1_35'),
+                     JR.which.cells(dataset, meta.col = 'sample',
+                                    which = '8402_WT_90_2_35'))
+cells.of.int <- colnames(dataset)[colnames(dataset) %in% cells.to.ignore == F]
+dataset.sub <- subset(dataset, cells = cells.of.int)
+dataset <- dataset.sub
+rm(dataset.sub)
+# creating directories and sub directories for data and plots and making sure
+# they have proper permission settings
+de.path <- paste0(path, '/pseudobulk_de_results/')
+system(paste0('rm -rf ', de.path))
+system(paste0('mkdir ', de.path))
+system(paste0('mkdir ',de.path, 'raw_data'))
+system(paste0('mkdir ',de.path, 'labels'))
+system(paste0('mkdir ',de.path, 'nolabels'))
+system(paste0('chmod a+rx ', de.path))
+system(paste0('chmod a+rx ', de.path, '*'))
+# iterates through each cell type and performs pseudobulk DE analysis with 
+# both DEL vs. WT and DUP vs. WT
+for(i in unique(dataset$predicted.id)){
+  # performing pseudobulk analysis 
+  dup.res <- JR.pseudo.bulk(dataset, samples.factor = 'sample',
+                            ident.factor = 'genotype',
+                            ident.1 = 'DUP', ident.2 = 'WT',
+                            subset.factor = 'predicted.id',
+                            subset = i)
+  del.res <- JR.pseudo.bulk(dataset, samples.factor = 'sample',
+                            ident.factor = 'genotype',
+                            ident.1 = 'DEL', ident.2 = 'WT',
+                            subset.factor = 'predicted.id',
+                            subset = i)
+  # writing raw output to csvs
+  write.csv(dup.res, file = paste0(de.path, 'raw_data/DUP_WT_',
+                                   gsub(x = i, pattern = ' ',
+                                        replacement = '_'),'.csv'))
+  write.csv(del.res, file = paste0(de.path, 'raw_data/DEL_WT_',
+                                   gsub(x = i, pattern = ' ',
+                                        replacement = '_'),'.csv'))
+  # creating volcano plots and saving
+  gg.del <- JR.pseudobulk.volc.plot(del.res, sigp = 1, overp = 100, sigfc = .5,
+                    overfc = 100, title = paste0(i, ': Patient DEL vs Control'),
+                    interesting.genes = genes.16p, max.overlaps = 500)
+  gg.del <- gg.del +
+    theme(plot.title = element_text(size=20)) +
+    scale_x_continuous(limits = c(-4,4), breaks = c(-4,-2,0,2,4)) +
+    scale_y_continuous(limits = c(-1,16), breaks = c(0,5,10,15))
+  gg.dup <- JR.pseudobulk.volc.plot(dup.res, sigp = 1, overp = 100, sigfc = .5,
+                        overfc = 100, title = paste0(i, ': Duplication vs WT'),
+                        interesting.genes = genes.16p, max.overlaps = 500)
+  ggsave(plot = gg.del,
+         filename = paste0(de.path, 'labels/DEL_WT_',
+                           gsub(x = i, pattern = ' ', replacement = '_'),'.png'),
+         device = 'png')
+  ggsave(plot = gg.dup,
+         filename = paste0(de.path, 'labels/DUP_WT_',
+                           gsub(x = i, pattern = ' ', replacement = '_'),'.png'),
+         device = 'png')
+  # plots without labels (not used in paper)
+  gg.del <- JR.pseudobulk.volc.plot(del.res, sigp = 2, overp = 100, sigfc = .5,
+                                    overfc = 100, title = i,
+                                    interesting.genes = genes.16p,
+                                    do.label = F) 
+  gg.del <- gg.del  +
+    theme(plot.title = element_text(size=20)) +
+    scale_x_continuous(limits = c(-4,4), breaks = c(-4,-2,0,2,4)) +
+    scale_y_continuous(limits = c(-1,16), breaks = c(0,5,10,15))
+  gg.dup <- JR.pseudobulk.volc.plot(dup.res, sigp = 2, overp = 100, sigfc = .5,
+                                    overfc = 100, title = i,
+                                    interesting.genes = genes.16p,
+                                    do.label = F)
+  gg.dup <- gg.dup + theme(plot.title = element_text(size=20))
+  ggsave(plot = gg.del,
+         filename = paste0(de.path, 'nolabels/DEL_WT_',
+                           gsub(x = i, pattern = ' ', replacement = '_'),'_nolab.png'),
+         device = 'png',
+         width = 7, height = 7)
+  ggsave(plot = gg.dup,
+         filename = paste0(de.path, 'nolabels/DUP_WT_',
+                           gsub(x = i, pattern = ' ', replacement = '_'),'_nolab.png'),
+         device = 'png',
+         width = 7, height = 7)
+}
+rm(dup.res, del.res, gg.del, gg.dup, cells.of.int, cells.to.ignore)
+```
+
+
+```{r}
+sessionInfo()
+```

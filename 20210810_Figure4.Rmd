@@ -1,0 +1,367 @@
+---
+title: "Figure 4"
+author: "Joe Raymond"
+date: "August 10, 2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(tidy = TRUE)
+knitr::opts_chunk$set(eval = TRUE)
+knitr::opts_chunk$set(fig.width = 8)
+knitr::opts_chunk$set(fig.height = 4)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(error = FALSE)
+knitr::opts_chunk$set(dev = 'png')
+knitr::opts_chunk$set(tidy = FALSE)
+library(Seurat)
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(RColorBrewer)
+library(matrixStats)
+library(tidyr)
+obj.path <- '/path/to/dataset'
+save.path <- '/some/path/'
+```
+
+## Helper Functions
+```{r}
+#grabs subset of cell names based on metadata (mostly exists for readability)
+## dataset - a seurat dataset
+## meta.col - the column name from dataset@meta.data containing the metadata
+##            being used for the subsetting
+## which - the value in 'meta.col' that is being selected
+JR.which.cells <- function(dataset = dataset,
+                           meta.col = 'genotype',
+                           which = 'WT'){
+  return(rownames(dataset@meta.data[dataset@meta.data[,meta.col] == which,]))
+}
+
+#Function to perform pseudobulk DE Seurat scRNA-seq object
+##samples.factor - the metadata column name that contains sample (library)
+##                 metadata info
+##ident.factor - the metadata column name that contains the contrast metadata 
+##               info
+##ident.1 - the value in <ident.factor> of the first subset of cells in the
+##          contrast
+##ident.2 (OPTIONAL) - the value in <ident.factor> of the second subset of cells
+##                     in the contrast
+##                   - leaving this value blank will use all other cells in
+##                     dataset as ident.2 
+##subset.factor (OPTIONAL) - the metadata column name that contains the values
+##                           to subset object by
+##subset (OPTIONAL) - the metadata value from <subset.factor> by which it will
+##                    subset the object
+##cells (OPTIONAL) - a vector of cell names to include in the contrast
+##                   (alternative to using subset)
+JR.pseudo.bulk <- function(dataset = dataset,
+                           samples.factor = 'sample',
+                           ident.factor = 'genotype',
+                           subset.factor = NULL,
+                           subset = NULL,
+                           cells = NULL,
+                           ident.1 = 'KO',
+                           ident.2 = NULL){
+  require(DESeq2)
+  require(dplyr)
+  require(rlist)
+  if(is.null(subset.factor) == F){
+    #subsets by 'subset' within 'subset.factor' if chosen
+    dataset <- subset(dataset,
+      cells = rownames(dataset@meta.data[dataset@meta.data[,subset.factor] == subset,]))
+  }
+  if(is.null(cells) == F){
+    #subsets using cell vector if provided
+    dataset <- subset(dataset, cells = cells)
+  }
+  #takes all cells not from ident.1 as ident.2 if an ident.2 isn't specified
+  if(is.null(ident.2)){
+    ident.2.cells <- rownames(dataset@meta.data[dataset@meta.data[,ident.factor] != ident.1,])
+  } else{
+    ident.2.cells <- rownames(dataset@meta.data[dataset@meta.data[,ident.factor] == ident.2,])
+  }
+  #takes only cells from within idents chosen (or all cells if ident.2 unspecified)
+  dataset <- subset(dataset,
+                    cells = c(rownames(dataset@meta.data[dataset@meta.data[,ident.factor] == ident.1,]),
+                             ident.2.cells))
+  #adding metadata to represent each of the idents and then splitting the data
+  #into unique sample/ident combinations for creating pseudobulk data
+  dataset@meta.data$new.idents <- 'ident1'
+  dataset@meta.data[ident.2.cells,]$new.idents <- 'ident2'
+  dataset$split.factor <- paste0(dataset$new.idents,
+                                 '_' ,dataset@meta.data[,samples.factor])
+  datasets <- SplitObject(dataset, split.by = 'split.factor')
+  bulk.de <- c() #will contain pseudobulk dataset
+  colnames.de <- c()
+  #loops through each sample to create a pseudobulk sample
+  for(i in 1:length(datasets)){
+    samp.name <- datasets[[i]]$split.factor %>% unique()
+    counts <- datasets[[i]]@assays$RNA@counts
+    bulk.samp <- rowSums(as.matrix(counts))
+    bulk.de <- cbind(bulk.de, bulk.samp)
+    colnames.de <- c(colnames.de, samp.name)
+    colnames(bulk.de) <- colnames.de
+  }
+  coldata <- dataset@meta.data %>%
+    dplyr::select(samples.factor, new.idents, split.factor) %>% unique()
+  colnames(coldata) <- c('samples.factor', 'ident.factor', 'split.factor')
+  rownames(coldata) <- coldata$split.factor
+  dds <- DESeqDataSetFromMatrix(countData = bulk.de,
+                                colData = coldata,
+                                design = ~ ident.factor)
+  dds <- DESeq(dds)
+  resultsNames(dds) # lists the coefficients
+  res <- results(dds, contrast = c('ident.factor', 'ident1', 'ident2')) %>%
+    as.data.frame() %>% dplyr::filter(baseMean > 0 & is.na(padj) == F)
+  summary(res$padj < .05)
+  return(res)
+}
+
+# Same idea as the pseudobulk de function, but just returns the count matrix
+# (in counts per million reads)
+# dataset - a seurat object for a single cell dataset
+# samples.factor - metadata column that defines how data will be split into samples
+# subset.factor - metadata column that will be used to subset data (optional)
+# subset - value to search for in 'subset.factor' to identify cells that will be kept
+JR.pseudo.bulk.dat <- function(dataset = dataset,
+                               samples.factor = 'sample',
+                               subset.factor = NULL,
+                               subset = NULL){
+  require(DESeq2)
+  require(dplyr)
+  require(rlist)
+  if(is.null(subset.factor) == F){
+    #subsets by 'subset' within 'subset.factor' if chosen
+    dataset <- subset(dataset,
+                      cells = rownames(dataset@meta.data[dataset@meta.data[,subset.factor] == subset,]))
+  }
+  datasets <- SplitObject(dataset, split.by = samples.factor) #splits into samples
+  bulk.de <- c() #will contain pseudobulk dataset
+  colnames.de <- c()
+  #loops through each sample to create a pseudobulk sample
+  for(i in 1:length(datasets)){
+    samp.name <- datasets[[i]]@meta.data[,samples.factor] %>% unique()
+    counts <- datasets[[i]]@assays$RNA@counts #raw counts
+    bulk.samp <- rowSums(as.matrix(counts)) 
+    bulk.de <- cbind(bulk.de, bulk.samp)
+    colnames.de <- c(colnames.de, samp.name)
+    colnames(bulk.de) <- colnames.de
+  }
+  cpms <- t(t(bulk.de)/(colSums(bulk.de)/1000000))
+  return(cpms)
+}
+```
+
+
+## Figure 4A
+```{r}
+load(obj.path)
+# list of genes within 16p11 deletion locus
+genes.16p <- c('SPN', 'QPRT', 'C16orf54', 'ZG16', 'KIF22', 'MAZ', 'PRRT2',
+               'PAGR1', 'MVP', 'CDIPT', 'SEZ6L2', 'ASPHD1', 'KCTD13', 'TMEM219',
+               'TAOK2', 'HIRIP3', 'INO80E', 'DOC2A', 'C16orf92', 'FAM57B',
+               'ALDOA', 'PPP4C', 'TBX6', 'YPEL3', 'GDPD3', 'MAPK3', 'CORO1A',
+               'BOLA2', 'SULT1A3', 'NPIPB13')
+# generating pseudobulk dataset and subsetting to the 16p11 genes
+dat <- JR.pseudo.bulk.dat(dataset, samples.factor = 'sample')
+dat <- dat[genes.16p[genes.16p %in% rownames(dat)],]
+# melting dataframe and using sample name to generate metadata into
+dat.melt <- melt(t(dat), value.name = 'count', id.var = rownames(dat))
+colnames(dat.melt) <- c('sample', 'Gene', 'Count')
+dat.melt <- separate(dat.melt, col = 'sample',
+                   sep = '_',
+                   into = c('cell_line', 'Genotype', 'age', 'batch', 'run'),
+                   remove = F) %>%
+  mutate(Genotype = factor(Genotype, levels = c('DEL', 'WT', 'DUP')))
+#normalizing all data to the average of the WT expression for each gene
+norm.fact <- dplyr::select(dat.melt, Genotype, Gene, Count) %>% 
+  dplyr::filter(Genotype == 'WT') %>%
+  dcast(Gene ~ Genotype, fun.aggregate = mean)
+dat.melt <- dplyr::left_join(x = dat.melt, y = norm.fact, by = 'Gene') %>%
+  dplyr::mutate('Normalized Count' = Count/WT)
+# calculating ANOVA statistic for each gene and saving to csv file
+pvals <- c()
+for(i in unique(dat.melt$Gene)){
+  res.aov.del <- aov(Count ~ Genotype,
+                     dat.melt[dat.melt$Gene == i & dat.melt$Genotype != 'DUP',])
+  res.aov.dup <- aov(Count ~ Genotype,
+                     dat.melt[dat.melt$Gene == i & dat.melt$Genotype != 'DEL',])
+  rw <- c(i, as.numeric(summary(res.aov.del)[[1]][["Pr(>F)"]][1]),
+          as.numeric(summary(res.aov.dup)[[1]][["Pr(>F)"]][1]))
+  pvals <- as.data.frame(rbind(pvals, rw))
+}
+colnames(pvals) <- c('Gene', 'pval_del', 'pval_dup')
+write.csv(pvals, row.names = F,
+    file = paste0(path,'Figure4A_stats.csv'))
+# plotting data in box/jitter plots
+gg <- ggplot(dat.melt) + 
+  geom_boxplot(aes(x = factor(Gene, levels = genes.16p), y = `Normalized Count`,
+                   color = Genotype), alpha = 5, weight = .5,
+               position = position_dodge(width = .75)) +
+  geom_jitter(position = position_dodge(width = .75),
+               aes(x = factor(Gene, levels = genes.16p), y = `Normalized Count`,
+                   color = Genotype), alpha = .6, size = 1) +
+  ggtitle('Pseudobulk Expression Levels of 16p11.2 Genes - All Cell Types') +
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = .5, size = 14),
+        axis.title.x = element_blank()) +
+  scale_y_continuous(trans = 'log2', breaks = c(.25, .5, 1, 2, 4)) +
+  theme(legend.title = element_blank()) +
+  ylab('Normalized Counts') +
+  theme(legend.text = element_text(size = 14)) +
+  theme(plot.title = element_text(hjust = .5, size = 16)) +
+  scale_fill_manual(values = c('blue', 'gray50', 'red')) +
+  scale_color_manual(values = c('blue', 'gray50', 'red'))
+gg
+ggsave(filename = paste0(path,'/Figure4A.png'),
+       plot = gg, device = 'png', width = 14, height = 4)
+rm(dat, norm.fact, dat.melt)
+```
+
+## 4B
+```{r}
+load(obj.path)
+# subsetting to only include one replicate of each biological sample to avoid
+# skewing of results toward cell lines with higher number of replicates
+cells.to.ignore <- c(JR.which.cells(dataset, meta.col = 'sample',
+                                    which = 'H9_WT_90_2_35'),
+                     JR.which.cells(dataset, meta.col = 'sample',
+                                    which = 'H9_WT_90_1_32'),
+                     JR.which.cells(dataset, meta.col = 'sample',
+                                    which = 'H9_WT_90_2_34'),
+                     JR.which.cells(dataset, meta.col = 'sample',
+                                    which = 'H9_WT_90_1_34'),
+                     JR.which.cells(dataset, meta.col = 'sample',
+                                    which = 'H9_WT_90_1_35'),
+                     JR.which.cells(dataset, meta.col = 'sample',
+                                    which = '8402_WT_90_2_35'))
+cells.of.int <- colnames(dataset)[colnames(dataset) %in% cells.to.ignore == F]
+dataset.sub <- subset(dataset, cells = cells.of.int)
+
+# running pseudobulk differential expression analysis
+dat <- JR.pseudo.bulk(dataset, samples.factor = 'sample',
+                      ident.factor = 'genotype',
+               ident.1 = 'DEL', ident.2 = 'WT')
+# function to create volcano plot
+JR.pseudobulk.volc.plot.alt <- function(res,
+                                      sigp=2, sigfc=.5,
+                                      overp=100, overfc=10,
+                                      title="",
+                                      up.genes = NULL,
+                                      down.genes = NULL,
+                                      genes.16p = genes.16p,
+                                      do.label = TRUE){
+  require(ggplot2)
+  require(ggrepel)
+  logp <- -log10(res[,6])
+  sig <- as.integer(0)
+  interesting <- as.integer(0)
+  df <- cbind(res, logp, sig, interesting)
+  df[rownames(df) %in% genes.16p ==T,]$interesting <- 1
+  df[rownames(df) %in% genes.16p ==T,]$sig <- 1
+  df[logp < sigp,]$interesting <- 0
+  Gene <- ifelse(df$interesting>=1,rownames(df),"")
+  df <- cbind(df, Gene)
+  colnames(df) <- c("baseMean","LogFC","lfcSE","stat","pvalue",
+                    "p.val.adj","Log10p.val.adj","sig","interesting","Gene")
+  df$Log10p.val.adj <- as.numeric(gsub(x = df$Log10p.val.adj,
+                                       pattern = Inf, replacement = 300))
+  gg <- ggplot(data=df, aes(x=LogFC,y=Log10p.val.adj)) + 
+    geom_point(aes(size=Log10p.val.adj, col=as.factor(sig), alpha = .1)) +
+    theme_bw() +
+    ylim(-1, NA) +
+    scale_color_manual(values=c("black","green",
+                                "red", "blue")[1:length(unique(df$sig))]) +
+    ylab("-Log10(p.val.adj)") + xlab("Log2FC") + 
+    geom_hline(yintercept= sigp, linetype="dashed", color = "red") +
+    geom_vline(xintercept= sigfc, linetype="dashed", color = "red") +
+    geom_vline(xintercept= -sigfc, linetype="dashed", color = "red") +
+    geom_vline(xintercept = 0, linetype = "solid", color = "black") + 
+    geom_hline(yintercept = 0, linetype = "solid", color = "black") +
+    ggtitle(title) + theme(legend.position="none") +
+    theme(plot.title = element_text(hjust = 0.5, size = 24))
+  if(max(abs(df$LogFC)) < 1){
+    gg <- gg + xlim(-1,1)
+  }
+  if(do.label == TRUE){
+    gg <- gg + geom_label_repel(data=df,aes(label= Gene), max.overlaps = 500)
+  }
+  
+  return(gg)
+}
+
+# plotting and saving plot
+gg <- JR.pseudobulk.volc.plot.alt(dat,
+                              title = 'Whole Dataset: Patient DEL vs. Control',
+                              genes.16p = genes.16p, do.label = T, sigp = 1)
+ggsave(filename = paste0(path,'Figure4B.png'),
+       plot = gg, device = 'png', width = 12, height = 6)
+rm(dataset.sub, cells.to.ignore, cells.of.int, dat)
+```
+
+## 4C
+```{r}
+load(obj.path)
+# generating pseudobulk dataset and subsetting to the genes of interest
+dat <- JR.pseudo.bulk.dat(dataset, samples.factor = 'sample')
+genes.of.int <- c('CHL1', 'DPP6', 'RBFOX1', 'CNTN4', 'SLITRK2', 'SLITRK4',
+                'PLPPR1', 'TCERG1L', 'NRN1', 'NLGN1', 'DMD', 'CCK', 'GAD2',
+                'SYNPR', 'COMT', 'PCDHGA7', 'NKX6-2', 'FLRT3', 'GRM1', 'SCN9A')
+dat <- dat[genes.of.int[genes.of.int %in% rownames(dat)],]
+# melting dataframe and using sample name to generate metadata into
+dat.melt <- melt(t(dat), value.name = 'count', id.var = rownames(dat))
+colnames(dat.melt) <- c('sample', 'Gene', 'Count')
+dat.melt <- separate(dat.melt, col = 'sample',
+                   sep = '_',
+                   into = c('cell_line', 'Genotype', 'age', 'batch', 'run'),
+                   remove = F) %>%
+  dplyr::filter(Genotype != 'DUP') %>%
+  mutate(Genotype = factor(Genotype, levels = c('DEL', 'WT')))
+#normalizing all data to the average of the WT expression for each gene
+norm.fact <- dplyr::select(dat.melt, Genotype, Gene, Count) %>% 
+  dplyr::filter(Genotype == 'WT') %>%
+  dcast(Gene ~ Genotype, fun.aggregate = mean)
+dat.melt <- dplyr::left_join(x = dat.melt, y = norm.fact, by = 'Gene') %>%
+  dplyr::mutate('Normalized Count' = Count/WT)
+# calculating ANOVA statistic for each gene and saving to csv file
+pvals <- c()
+for(i in unique(dat.melt$Gene)){
+  res.aov.del <- aov(Count ~ Genotype,
+                     dat.melt[dat.melt$Gene == i & dat.melt$Genotype != 'DUP',])
+  rw <- c(i, as.numeric(summary(res.aov.del)[[1]][["Pr(>F)"]][1]))
+  pvals <- as.data.frame(rbind(pvals, rw))
+}
+colnames(pvals) <- c('Gene', 'pval')
+write.csv(pvals, row.names = F,
+    file = paste0(path,'Figure4C_stats.csv'))
+# plotting data in box/jitter plots
+gg <- ggplot(dat.melt) + 
+  geom_boxplot(aes(x = Gene, y = `Normalized Count`, color = Genotype),
+               alpha = 5, weight = .5, position = position_dodge(width = 1)) +
+  geom_jitter(position = position_dodge(width = 1),
+               aes(x = Gene, y = `Normalized Count`, color = Genotype),
+               alpha = .6, size = 1) +
+  ggtitle('') + theme_classic() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = .5, size = 18),
+        axis.title.x = element_blank(), axis.title.y = element_text(size = 20)) +
+  scale_y_continuous(trans = 'log2', breaks = c(.125/2, .25, 1, 4, 16)) +
+  theme(legend.title = element_blank()) +
+  ylab('Normalized Counts') +
+  theme(legend.text = element_text(size = 14)) +
+  theme(plot.title = element_text(hjust = .5, size = 24)) +
+  scale_fill_manual(values = c('blue', 'gray50')) +
+  scale_color_manual(values = c('blue', 'gray50')) + 
+  ggtitle('Pseudobulk Genes - All Cell Types')
+ggsave(filename = paste0(path, 'Figure4C.png'),
+       plot = gg, device = 'png', width = 12, height = 6)
+rm(path, dat.melt, norm.fact, genes.of.int, dat)
+```
+
+
+
+```{r}
+sessionInfo()
+```

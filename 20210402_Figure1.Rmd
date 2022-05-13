@@ -1,0 +1,93 @@
+---
+title: "Figure 1"
+author: "Joe Raymond"
+date: "April 2, 2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(tidy = TRUE)
+knitr::opts_chunk$set(eval = TRUE)
+knitr::opts_chunk$set(fig.width = 8)
+knitr::opts_chunk$set(fig.height = 4)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(error = FALSE)
+knitr::opts_chunk$set(dev = 'png')
+knitr::opts_chunk$set(tidy = FALSE)
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(RColorBrewer)
+```
+
+```{r, eval = TRUE, echo = FALSE}
+#Helper functions and color palettes
+colors <- c(brewer.pal(7,"Set2"),brewer.pal(7,"Set1"),brewer.pal(7,"Set3"))
+heat <- c('sky blue', 'lightyellow2', 'red')
+```
+```{r, eval = TRUE, echo = FALSE}
+#Loading data
+path.int <- '/dlab/NS/tnt/data/by-source/H1/sc-rnaseq/10XJR22_CROPseqJR05_20181121/Seurat_10XJR22_CROPseqJR05/dataset_geschwind_int.Robj'
+load(path.int)
+dataset.int <- dataset
+path <- '/dlab/NS/tnt/data/by-source/H1/sc-rnaseq/10XJR22_CROPseqJR05_20181121/Seurat_10XJR22_CROPseqJR05/dataset_w_anchors_integrated_emb.Robj'
+load(path)
+```
+
+## Merging Maturing Neurons and Migrating Neurons
+```{r}
+meta <- dataset@meta.data
+meta$predicted.id2 <- meta$predicted.id
+meta[meta$predicted.id == 'Maturing Neurons' | meta$predicted.id == 'Migrating Neurons',]$predicted.id2 <- 'Migrating/Maturing Neurons'
+dataset@meta.data <- meta
+
+meta <- dataset.int@meta.data
+meta <- meta[!is.na(meta$predicted.id),]
+meta$predicted.id2 <- meta$predicted.id
+meta[meta$predicted.id == 'Maturing Neurons' | meta$predicted.id == 'Migrating Neurons','predicted.id2'] <- 'Migrating/Maturing Neurons'
+dataset.int@meta.data <- meta
+dataset.int <- subset(dataset.int, cells = rownames(meta))
+```
+
+
+## Figure 1C
+```{r}
+UMAPPlot(dataset, group.by = 'predicted.id2',
+         split.by = 'condition', cols = c(colors[1:6], colors[8:13])) +
+  ggtitle('')
+```
+
+## Figure 1D
+```{r}
+UMAPPlot(dataset, group.by = 'condition', cols = colors)
+```
+
+## Figure 1E
+```{r}
+genes <- c('SOX2', 'MKI67', 'EOMES', 'TBR1', 'GAD2',
+           'PAX6', 'TOP2A', 'HES6', 'NEUROD6', 'DLX2')
+for(i in genes){
+  print(FeaturePlot(dataset, features = i, cols = heat))
+}
+```
+
+## Figure 1H
+```{r}
+gg <- UMAPPlot(dataset.int, group.by = 'predicted.id2',
+         split.by = 'exp', cols = c(colors[1:6], colors[8:13]))
+gg <- gg +
+  ggtitle('') +
+  theme(axis.text.x = element_text(size = 16),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 16),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 22)) 
+```
+
+
+```{r}
+sessionInfo()
+```
+
